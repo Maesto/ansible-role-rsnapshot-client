@@ -1,0 +1,6 @@
+include_conf	/etc/rsnapshot.conf
+lockfile	/var/run/rsnapshot-{{inventory_hostname}}.pid
+snapshot_root	/media/backup/{{ inventory_hostname }}/
+{% for item in backup_dirs %}
+backup	rsnapbackup@{{inventory_hostname}}:{{ item }}	./
+{% endfor %}

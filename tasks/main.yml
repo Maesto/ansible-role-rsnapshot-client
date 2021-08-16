@@ -1,0 +1,101 @@
+- name: Import OS specific vars
+  include_vars: "{{ ansible_distribution }}.yml"
+
+- name: install common packages
+  package:
+    name: "{{ item }}"
+  with_items: "{{ maesto_rsnapshot_packages }}"
+
+- name: create backup ssh user
+  user:
+    name: rsnapbackup
+
+- name: copy sshkey from backupserver
+  slurp:
+    src: "/home/rsnapbackup/.ssh/id_rsa.pub"
+  register: pubkey
+  delegate_to: "{{ backup_server }}"
+
+- name: create ssh folder
+  file:
+    path: "/home/rsnapbackup/.ssh"
+    state: directory
+    owner: "rsnapbackup"
+    group: "rsnapbackup"
+    mode: "0700"
+
+- name: push ssh pubkey
+  authorized_key:
+    user: "rsnapbackup"
+    state: present
+    key: "{{ pubkey['content'] | b64decode }}"
+    key_options: command="/home/rsnapbackup/validatersync.sh"
+
+- name: get host key
+  slurp:
+    src: "/etc/ssh/ssh_host_ecdsa_key.pub"
+  register: hostkey
+
+- name: ensure known_hosts exists
+  copy:
+    content: ''
+    force: no
+    dest: "/root/.ssh/known_hosts"
+  delegate_to: "{{ backup_server }}"
+
+- name: ensure host is known
+  lineinfile:
+    path: "/root/.ssh/known_hosts"
+    line: "{{ inventory_hostname }} {{ hostkey['content'] | b64decode }}"
+    regexp: '^{{ inventory_hostname }}'
+  delegate_to: "{{ backup_server }}"
+
+- name: push rsync script
+  copy:
+    src: validatersync.sh
+    dest: /home/rsnapbackup/validatersync.sh
+    owner: "rsnapbackup"
+    group: "rsnapbackup"
+    mode: "0700"
+
+- name: copy sudoersfile to sudoers.d
+  copy:
+    src: "rsnapbackupsudo"
+    dest: "/etc/sudoers.d/rsnapbackup"
+    mode: "0440"
+
+- name: template out config
+  template:
+    src: rsnapshot.conf.j2
+    dest: "/etc/rsnapshot.conf.d/{{ inventory_hostname }}.conf"
+  delegate_to: "{{ backup_server }}"
+
+- name: create rsnapshotroot folder
+  file:
+    path: "/media/backup/{{ inventory_hostname }}"
+    state: directory
+  delegate_to: "{{ backup_server }}" 
+
+- name: remove standard rsnapshot cron file
+  file:
+    path: "/etc/cron.d/rsnapshot"
+    state: absent
+  delegate_to: "{{ backup_server }}" 
+
+
+- name: populate crontab
+  cron:
+    name: "rsnapshot {{ inventory_hostname }}"
+    weekday: "{{ item.weekday }}"
+    day: "{{ item.dom }}"
+    minute: "{{ item.minute }}"
+    hour: "{{ item.hour }}"
+    user: "{{ item.user }}"
+    job: "{{ item.job }}"
+    cron_file: "rsnapshot_{{inventory_hostname | regex_replace('\\.','-') }}_{{ item.name }}"
+  delegate_to: "{{ backup_server }}" 
+  with_items:
+    - {name: 'bidaily', dom: '*',  weekday: '*', minute: '2', hour: '*/12', user: 'rsnapbackup', job: "/usr/bin/sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.d/{{ inventory_hostname }}.conf sync && /usr/bin/sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.d/{{ inventory_hostname }}.conf bidaily"}
+    - {name: 'daily', dom: '*', weekday: '*', minute: '0', hour: '1', user: 'rsnapbackup', job: "/usr/bin/sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.d/{{ inventory_hostname }}.conf daily"}
+    - {name: 'weekly', dom: '*', weekday: '1', minute: '0', hour: '2', user: 'rsnapbackup', job: "/usr/bin/sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.d/{{ inventory_hostname }}.conf weekly"}
+    - {name: 'monthly', dom: '1', weekday: '*', minute: '0', hour: '3', user: 'rsnapbackup', job: "/usr/bin/sudo /usr/bin/rsnapshot -c /etc/rsnapshot.conf.d/{{ inventory_hostname }}.conf monthly"}
